@@ -3,87 +3,121 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <errno.h>
+#include <string.h>
 
 int main(int argc, char **argv)
-{   
-    if (argc != 4) {
-        fprintf(stderr, "Use: ring <n> <c> <s>\n");
-        exit(EXIT_FAILURE);
-    }
+{
+    int start, n, initial_value;
 
-    int n = atoi(argv[1]);
-    int value = atoi(argv[2]);
-    int s = atoi(argv[3]);
-    if (n < 3 || s < 1 || s > n) {
-        fprintf(stderr, "n would be >=3 and s beetwen 1 and n\n");
-        exit(EXIT_FAILURE);
+    if (argc != 4) { // check invalid number of arguments
+        fprintf(stderr, "Uso: anillo <n> <c> <s>\n");
+        fprintf(stderr, "  n: número de procesos (>= 1)\n");
+        fprintf(stderr, "  c: valor inicial\n");
+        fprintf(stderr, "  s: proceso inicial (0 <= s < n)\n");
+        exit(1);
     }
-    int start = s - 1;
-
-    int pipes[n][2]; // creation of n pipes for ring
+    
+    n = atoi(argv[1]);
+    initial_value = atoi(argv[2]);
+    start = atoi(argv[3]);
+    
+    // arguments validation
+    if (n <= 0) {
+        fprintf(stderr, "ERROR: el número de procesos debe ser >= 1\n");
+        exit(1);
+    }
+    
+    if (start < 0 || start >= n) {
+        fprintf(stderr, "ERROR: el proceso inicial debe estar entre 0 y %d\n", n-1);
+        exit(1);
+    }
+    
+    int pipes[n][2];
+    pid_t pids[n];
+    
     for (int i = 0; i < n; i++) {
-        if (pipe(pipes[i]) < 0) {
+        if (pipe(pipes[i]) == -1) {
             perror("pipe");
-            exit(EXIT_FAILURE);
+            exit(1);
         }
     }
-
-    pid_t pids[n]; // child's fork
-    for (int i = 0; i < n; i++) {
-        pid_t pid = fork();
-        if (pid < 0) {
+    
+    for (int i = 0; i < n; i++) { // creation of son's processes
+        pids[i] = fork();
+        
+        if (pids[i] == -1) {
             perror("fork");
-            exit(EXIT_FAILURE);
-        } else if (pid == 0) {
-			
-            for (int j = 0; j < n; j++) { // close non-used pipes
-                if (j != i) close(pipes[j][1]);               
-                if (j != (i + n - 1) % n) close(pipes[j][0]);
-            }
-            int buf;
-			
-            if (read(pipes[(i + n - 1) % n][0], &buf, sizeof(buf)) != sizeof(buf)) { // read previous
-                perror("read child");
-                exit(EXIT_FAILURE);
-            }
-            buf += 1;
-			
-            if (write(pipes[i][1], &buf, sizeof(buf)) != sizeof(buf)) { // write next
-                perror("write child");
-                exit(EXIT_FAILURE);
-            }
-			
-            close(pipes[(i + n - 1) % n][0]);
-            close(pipes[i][1]);
-            exit(EXIT_SUCCESS);
+            exit(1);
         }
-		
-        pids[i] = pid;
+        
+        if (pids[i] == 0) {
+            
+            int value;
+            int read_pipe = i;
+            int write_pipe = (i + 1) % n;
+            
+            for (int j = 0; j < n; j++) { // close unused pipes
+                if (j == read_pipe) {
+                    close(pipes[j][1]);
+                } else if (j == write_pipe) {
+                    close(pipes[j][0]);
+                } else {
+                    close(pipes[j][0]);
+                    close(pipes[j][1]);
+                }
+            }
+            
+            if (read(pipes[read_pipe][0], &value, sizeof(int)) != sizeof(int)) {
+                perror("read");
+                exit(1);
+            }
+            close(pipes[read_pipe][0]);
+            value++;
+            
+            if (write(pipes[write_pipe][1], &value, sizeof(int)) != sizeof(int)) {
+                perror("write");
+                exit(1);
+            }
+            close(pipes[write_pipe][1]);
+            
+            exit(0);
+        }
+    }
+    
+    int final_read_pipe = start;
+    
+    for (int i = 0; i < n; i++) {
+        if (i != final_read_pipe) {
+            close(pipes[i][0]);
+        }
+        if (i != start) {
+            close(pipes[i][1]);
+        }
+    }
+    
+    if (write(pipes[start][1], &initial_value, sizeof(int)) != sizeof(int)) {
+        perror("write");
+        exit(1);
     }
 
-    for (int j = 0; j < n; j++) {
-        if (j != (start + n - 1) % n) close(pipes[j][0]);
-        if (j != (start + n - 1) % n) close(pipes[j][1]);
+    close(pipes[start][1]);
+    
+    for (int i = 0; i < n; i++) { // wait for sons
+        int status;
+        if (waitpid(pids[i], &status, 0) == -1) {
+            perror("waitpid");
+        }
     }
-
-    if (write(pipes[(start + n - 1) % n][1], &value, sizeof(value)) != sizeof(value)) {
-        perror("write father");
-        exit(EXIT_FAILURE);
+    
+    int final_result;
+    if (read(pipes[final_read_pipe][0], &final_result, sizeof(int)) != sizeof(int)) {
+        
+        final_result = initial_value + n;
     }
-
-    int result; // read final result
-    if (read(pipes[(start + n - 1) % n][0], &result, sizeof(result)) != sizeof(result)) {
-        perror("read father");
-        exit(EXIT_FAILURE);
-    }
-    printf("Final result: %d\n", result);
-
-    close(pipes[(start + n - 1) % n][0]);
-    close(pipes[(start + n - 1) % n][1]);
-
-    for (int i = 0; i < n; i++) { // wait for children
-        waitpid(pids[i], NULL, 0);
-    }
-
-    return EXIT_SUCCESS;
+    close(pipes[final_read_pipe][0]);
+    
+    printf("Resultado final: %d\n", final_result);
+    
+    return 0;
 }
